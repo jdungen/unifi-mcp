@@ -1,0 +1,28 @@
+# Coolify deployment (multi-user web GUI + OAuth-protected /mcp).
+#
+# Differs from docker-compose.yml: no published host port. Coolify's proxy
+# terminates TLS and routes the domain to port 8000 inside the container, so the
+# plain-HTTP port is never reachable directly on the server's public IP.
+#
+# Set in Coolify: the domain for service `unifi-mcp` (port 8000), and the env
+# vars UNIFI_PUBLIC_URL (https://...) and UNIFI_ONBOARD_CODE (long random string).
+
+services:
+  unifi-mcp:
+    build: .
+    entrypoint: ["unifi-mcp-web"]
+    environment:
+      UNIFI_PUBLIC_URL: ${UNIFI_PUBLIC_URL:-}
+      UNIFI_SECRET_KEY: ${UNIFI_SECRET_KEY:-}
+      UNIFI_RP_NAME: ${UNIFI_RP_NAME:-UniFi MCP}
+      UNIFI_ONBOARD_CODE: ${UNIFI_ONBOARD_CODE:?UNIFI_ONBOARD_CODE must be set}
+      UNIFI_OAUTH_REDIRECT_URIS: ${UNIFI_OAUTH_REDIRECT_URIS:-}
+      UNIFI_API_TIMEOUT: ${UNIFI_API_TIMEOUT:-30}
+    expose:
+      - "8000"
+    volumes:
+      - unifi-data:/data
+    restart: unless-stopped
+
+volumes:
+  unifi-data:

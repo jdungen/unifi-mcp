@@ -12,6 +12,7 @@ from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import ToolAnnotations
 
 from unifi_mcp.client import UniFiApiError, UniFiClient
 from unifi_mcp.formatting import (
@@ -310,8 +311,14 @@ def _get_protect_client(console_id: str | None = None) -> ProtectClient:
 # Site Manager API Tools
 # ---------------------------------------------------------------------------
 
+# Tool annotations (MCP spec): let clients such as claude.ai tell read-only
+# tools apart from tools that change or remove configuration, so they can ask
+# for confirmation before a write. Hints only; nothing is blocked server-side.
+READ = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=True)
+WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True)
+DESTRUCTIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=True)
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def list_hosts(
     page_size: int = 25,
     next_token: str | None = None,
@@ -334,7 +341,7 @@ async def list_hosts(
         return _error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def get_host(host_id: str) -> str:
     """Get detailed information about a specific UniFi host.
 
@@ -353,7 +360,7 @@ async def get_host(host_id: str) -> str:
         return _error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def list_sites(
     page_size: int = 25,
     next_token: str | None = None,
@@ -376,7 +383,7 @@ async def list_sites(
         return _error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def list_devices(
     host_ids: list[str] | None = None,
     time: str | None = None,
@@ -404,7 +411,7 @@ async def list_devices(
         return _error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def get_isp_metrics(
     metric_type: str,
     duration: str | None = None,
@@ -435,7 +442,7 @@ async def get_isp_metrics(
         return _error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def query_isp_metrics(
     metric_type: str,
     sites: list[dict[str, str]],
@@ -467,7 +474,7 @@ async def query_isp_metrics(
         return _error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def get_sdwan_config(
     config_id: str | None = None,
     include_status: bool = False,
@@ -508,7 +515,7 @@ async def get_sdwan_config(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def mobility_list_workspaces() -> str:
     """List UniFi Mobility workspaces (mobile-routing cloud sites) you can access.
 
@@ -524,7 +531,7 @@ async def mobility_list_workspaces() -> str:
         return _mobility_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def mobility_list_admins(workspace_id: str) -> str:
     """List admins of a Mobility workspace with their mobile-routing permissions.
 
@@ -539,7 +546,7 @@ async def mobility_list_admins(workspace_id: str) -> str:
         return _mobility_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def mobility_list_devices(
     workspace_id: str,
     offset: int = 0,
@@ -560,7 +567,7 @@ async def mobility_list_devices(
         return _mobility_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def mobility_get_device(workspace_id: str, device_id: str) -> str:
     """Get full detail for a Mobility device (WAN, cellular, WiFi, VPN, GPS, subscription).
 
@@ -576,7 +583,7 @@ async def mobility_get_device(workspace_id: str, device_id: str) -> str:
         return _mobility_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def mobility_list_device_clients(
     workspace_id: str,
     device_id: str,
@@ -601,7 +608,7 @@ async def mobility_list_device_clients(
         return _mobility_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def mobility_update_device_name(
     workspace_id: str,
     device_id: str,
@@ -622,7 +629,7 @@ async def mobility_update_device_name(
         return _mobility_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def mobility_update_device_network(
     workspace_id: str,
     device_id: str,
@@ -647,7 +654,7 @@ async def mobility_update_device_network(
         return _mobility_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def mobility_update_device_wireless(
     workspace_id: str,
     device_id: str,
@@ -680,7 +687,7 @@ async def mobility_update_device_wireless(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_info(console_id: str | None = None) -> str:
     """Get UniFi Network application info and list all local sites.
 
@@ -703,7 +710,7 @@ async def network_info(console_id: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_devices(
     site_id: str,
     offset: int = 0,
@@ -725,7 +732,7 @@ async def network_list_devices(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_get_device(
     site_id: str,
     device_id: str,
@@ -754,7 +761,7 @@ async def network_get_device(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_device_action(
     site_id: str,
     device_id: str,
@@ -783,7 +790,7 @@ async def network_device_action(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_clients(
     site_id: str,
     offset: int = 0,
@@ -805,7 +812,7 @@ async def network_list_clients(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_get_client(
     site_id: str,
     client_id: str,
@@ -825,7 +832,7 @@ async def network_get_client(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_client_action(
     site_id: str,
     client_id: str,
@@ -854,7 +861,7 @@ async def network_client_action(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_networks(
     site_id: str,
     offset: int = 0,
@@ -876,7 +883,7 @@ async def network_list_networks(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_get_network(
     site_id: str,
     network_id: str,
@@ -896,7 +903,7 @@ async def network_get_network(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 async def network_create_network(
     site_id: str,
     data: dict,
@@ -916,7 +923,7 @@ async def network_create_network(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_update_network(
     site_id: str,
     network_id: str,
@@ -938,7 +945,7 @@ async def network_update_network(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_delete_network(
     site_id: str,
     network_id: str,
@@ -963,7 +970,7 @@ async def network_delete_network(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_wifi(
     site_id: str,
     offset: int = 0,
@@ -985,7 +992,7 @@ async def network_list_wifi(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_get_wifi(
     site_id: str,
     wifi_id: str,
@@ -1005,7 +1012,7 @@ async def network_get_wifi(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 async def network_create_wifi(
     site_id: str,
     data: dict,
@@ -1025,7 +1032,7 @@ async def network_create_wifi(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_update_wifi(
     site_id: str,
     wifi_id: str,
@@ -1047,7 +1054,7 @@ async def network_update_wifi(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_delete_wifi(
     site_id: str,
     wifi_id: str,
@@ -1072,7 +1079,7 @@ async def network_delete_wifi(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_firewall_zones(
     site_id: str,
     offset: int = 0,
@@ -1094,7 +1101,7 @@ async def network_list_firewall_zones(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_firewall_policies(
     site_id: str,
     offset: int = 0,
@@ -1116,7 +1123,7 @@ async def network_list_firewall_policies(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 async def network_create_firewall_policy(
     site_id: str,
     data: dict,
@@ -1136,7 +1143,7 @@ async def network_create_firewall_policy(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_update_firewall_policy(
     site_id: str,
     policy_id: str,
@@ -1158,7 +1165,7 @@ async def network_update_firewall_policy(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_delete_firewall_policy(
     site_id: str,
     policy_id: str,
@@ -1183,7 +1190,7 @@ async def network_delete_firewall_policy(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_dns_policies(
     site_id: str,
     offset: int = 0,
@@ -1210,7 +1217,7 @@ async def network_list_dns_policies(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_vouchers(
     site_id: str,
     offset: int = 0,
@@ -1232,7 +1239,7 @@ async def network_list_vouchers(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 async def network_create_vouchers(
     site_id: str,
     data: dict,
@@ -1252,7 +1259,7 @@ async def network_create_vouchers(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_delete_voucher(
     site_id: str,
     voucher_id: str,
@@ -1277,7 +1284,7 @@ async def network_delete_voucher(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_wans(
     site_id: str,
     offset: int = 0,
@@ -1299,7 +1306,7 @@ async def network_list_wans(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_vpn_tunnels(
     site_id: str,
     offset: int = 0,
@@ -1321,7 +1328,7 @@ async def network_list_vpn_tunnels(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_vpn_servers(
     site_id: str,
     offset: int = 0,
@@ -1343,7 +1350,7 @@ async def network_list_vpn_servers(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_radius_profiles(
     site_id: str,
     offset: int = 0,
@@ -1370,7 +1377,7 @@ async def network_list_radius_profiles(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_pending_devices(offset: int = 0, limit: int = 25, console_id: str | None = None) -> str:
     """List devices pending adoption across the local Network application.
 
@@ -1386,7 +1393,7 @@ async def network_list_pending_devices(offset: int = 0, limit: int = 25, console
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_adopt_device(
     site_id: str,
     mac_address: str,
@@ -1411,7 +1418,7 @@ async def network_adopt_device(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_remove_device(site_id: str, device_id: str, console_id: str | None = None) -> str:
     """Remove (unadopt) a device from a local UniFi site. Online devices are factory reset.
 
@@ -1427,7 +1434,7 @@ async def network_remove_device(site_id: str, device_id: str, console_id: str | 
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_port_action(
     site_id: str,
     device_id: str,
@@ -1458,7 +1465,7 @@ async def network_port_action(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_acl_rules(
     site_id: str, offset: int = 0, limit: int = 25,
     console_id: str | None = None,
@@ -1478,7 +1485,7 @@ async def network_list_acl_rules(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_get_acl_rule(site_id: str, acl_rule_id: str, console_id: str | None = None) -> str:
     """Get a specific ACL rule.
 
@@ -1494,7 +1501,7 @@ async def network_get_acl_rule(site_id: str, acl_rule_id: str, console_id: str |
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 async def network_create_acl_rule(site_id: str, data: dict, console_id: str | None = None) -> str:
     """Create a user-defined ACL rule on a local UniFi site.
 
@@ -1510,7 +1517,7 @@ async def network_create_acl_rule(site_id: str, data: dict, console_id: str | No
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_update_acl_rule(
     site_id: str, acl_rule_id: str, data: dict,
     console_id: str | None = None,
@@ -1530,7 +1537,7 @@ async def network_update_acl_rule(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_delete_acl_rule(site_id: str, acl_rule_id: str, console_id: str | None = None) -> str:
     """Delete a user-defined ACL rule.
 
@@ -1546,7 +1553,7 @@ async def network_delete_acl_rule(site_id: str, acl_rule_id: str, console_id: st
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_acl_rule_ordering(
     site_id: str, ordered_acl_rule_ids: list[str] | None = None,
     console_id: str | None = None,
@@ -1576,7 +1583,7 @@ async def network_acl_rule_ordering(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_get_dns_policy(site_id: str, dns_policy_id: str, console_id: str | None = None) -> str:
     """Get a specific DNS policy.
 
@@ -1592,7 +1599,7 @@ async def network_get_dns_policy(site_id: str, dns_policy_id: str, console_id: s
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 async def network_create_dns_policy(site_id: str, data: dict, console_id: str | None = None) -> str:
     """Create a DNS policy (A/AAAA/CNAME/MX/SRV/TXT record or forward domain).
 
@@ -1608,7 +1615,7 @@ async def network_create_dns_policy(site_id: str, data: dict, console_id: str | 
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_update_dns_policy(
     site_id: str, dns_policy_id: str, data: dict,
     console_id: str | None = None,
@@ -1628,7 +1635,7 @@ async def network_update_dns_policy(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_delete_dns_policy(site_id: str, dns_policy_id: str, console_id: str | None = None) -> str:
     """Delete a DNS policy.
 
@@ -1649,7 +1656,7 @@ async def network_delete_dns_policy(site_id: str, dns_policy_id: str, console_id
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_get_firewall_zone(site_id: str, firewall_zone_id: str, console_id: str | None = None) -> str:
     """Get a specific firewall zone.
 
@@ -1665,7 +1672,7 @@ async def network_get_firewall_zone(site_id: str, firewall_zone_id: str, console
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 async def network_create_firewall_zone(site_id: str, data: dict, console_id: str | None = None) -> str:
     """Create a custom firewall zone.
 
@@ -1681,7 +1688,7 @@ async def network_create_firewall_zone(site_id: str, data: dict, console_id: str
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_update_firewall_zone(
     site_id: str, firewall_zone_id: str, data: dict,
     console_id: str | None = None,
@@ -1701,7 +1708,7 @@ async def network_update_firewall_zone(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_delete_firewall_zone(site_id: str, firewall_zone_id: str, console_id: str | None = None) -> str:
     """Delete a custom firewall zone.
 
@@ -1717,7 +1724,7 @@ async def network_delete_firewall_zone(site_id: str, firewall_zone_id: str, cons
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_get_firewall_policy(site_id: str, policy_id: str, console_id: str | None = None) -> str:
     """Get a specific firewall policy.
 
@@ -1733,7 +1740,7 @@ async def network_get_firewall_policy(site_id: str, policy_id: str, console_id: 
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_firewall_policy_ordering(
     site_id: str,
     source_zone_id: str,
@@ -1774,7 +1781,7 @@ async def network_firewall_policy_ordering(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_traffic_matching_lists(
     site_id: str, offset: int = 0, limit: int = 25,
     console_id: str | None = None,
@@ -1796,7 +1803,7 @@ async def network_list_traffic_matching_lists(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_get_traffic_matching_list(site_id: str, list_id: str, console_id: str | None = None) -> str:
     """Get a specific traffic matching list.
 
@@ -1812,7 +1819,7 @@ async def network_get_traffic_matching_list(site_id: str, list_id: str, console_
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 async def network_create_traffic_matching_list(site_id: str, data: dict, console_id: str | None = None) -> str:
     """Create a traffic matching list.
 
@@ -1828,7 +1835,7 @@ async def network_create_traffic_matching_list(site_id: str, data: dict, console
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_update_traffic_matching_list(
     site_id: str, list_id: str, data: dict,
     console_id: str | None = None,
@@ -1848,7 +1855,7 @@ async def network_update_traffic_matching_list(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def network_delete_traffic_matching_list(site_id: str, list_id: str, console_id: str | None = None) -> str:
     """Delete a traffic matching list.
 
@@ -1869,7 +1876,7 @@ async def network_delete_traffic_matching_list(site_id: str, list_id: str, conso
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_lags(site_id: str, offset: int = 0, limit: int = 25, console_id: str | None = None) -> str:
     """List Link Aggregation Groups (LAGs) on a local UniFi site.
 
@@ -1886,7 +1893,7 @@ async def network_list_lags(site_id: str, offset: int = 0, limit: int = 25, cons
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_get_lag(site_id: str, lag_id: str, console_id: str | None = None) -> str:
     """Get details of a specific LAG.
 
@@ -1902,7 +1909,7 @@ async def network_get_lag(site_id: str, lag_id: str, console_id: str | None = No
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_mc_lag_domains(
     site_id: str, offset: int = 0, limit: int = 25,
     console_id: str | None = None,
@@ -1922,7 +1929,7 @@ async def network_list_mc_lag_domains(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_get_mc_lag_domain(site_id: str, mc_lag_domain_id: str, console_id: str | None = None) -> str:
     """Get details of a specific MC-LAG domain.
 
@@ -1938,7 +1945,7 @@ async def network_get_mc_lag_domain(site_id: str, mc_lag_domain_id: str, console
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_switch_stacks(
     site_id: str, offset: int = 0, limit: int = 25,
     console_id: str | None = None,
@@ -1958,7 +1965,7 @@ async def network_list_switch_stacks(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_get_switch_stack(site_id: str, switch_stack_id: str, console_id: str | None = None) -> str:
     """Get details of a specific switch stack.
 
@@ -1979,7 +1986,7 @@ async def network_get_switch_stack(site_id: str, switch_stack_id: str, console_i
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_get_network_references(site_id: str, network_id: str, console_id: str | None = None) -> str:
     """List what references a network (clients, devices, routes, WiFi, NAT, etc.).
 
@@ -1995,7 +2002,7 @@ async def network_get_network_references(site_id: str, network_id: str, console_
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_device_tags(
     site_id: str, offset: int = 0, limit: int = 25,
     console_id: str | None = None,
@@ -2015,7 +2022,7 @@ async def network_list_device_tags(
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_countries(offset: int = 0, limit: int = 25, console_id: str | None = None) -> str:
     """List ISO country codes/names used for region-based configuration.
 
@@ -2031,7 +2038,7 @@ async def network_list_countries(offset: int = 0, limit: int = 25, console_id: s
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_dpi_applications(offset: int = 0, limit: int = 25, console_id: str | None = None) -> str:
     """List DPI-recognized applications (for firewall/traffic rules).
 
@@ -2047,7 +2054,7 @@ async def network_list_dpi_applications(offset: int = 0, limit: int = 25, consol
         return _network_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def network_list_dpi_categories(offset: int = 0, limit: int = 25, console_id: str | None = None) -> str:
     """List DPI application categories (for firewall/traffic rules).
 
@@ -2068,7 +2075,7 @@ async def network_list_dpi_categories(offset: int = 0, limit: int = 25, console_
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_info(console_id: str | None = None) -> str:
     """Get UniFi Protect application info and NVR system status.
 
@@ -2091,7 +2098,7 @@ async def protect_info(console_id: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_list_cameras(console_id: str | None = None) -> str:
     """List all cameras managed by UniFi Protect.
 
@@ -2106,7 +2113,7 @@ async def protect_list_cameras(console_id: str | None = None) -> str:
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_get_camera(camera_id: str, console_id: str | None = None) -> str:
     """Get detailed information about a specific Protect camera.
 
@@ -2121,7 +2128,7 @@ async def protect_get_camera(camera_id: str, console_id: str | None = None) -> s
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_update_camera(camera_id: str, data: dict, console_id: str | None = None) -> str:
     """Update a Protect camera's settings (name, OSD, LED, etc.).
 
@@ -2137,7 +2144,7 @@ async def protect_update_camera(camera_id: str, data: dict, console_id: str | No
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_get_camera_snapshot(camera_id: str, console_id: str | None = None) -> str:
     """Get a JPEG snapshot from a Protect camera.
 
@@ -2160,7 +2167,7 @@ async def protect_get_camera_snapshot(camera_id: str, console_id: str | None = N
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_list_lights(console_id: str | None = None) -> str:
     """List all lights managed by UniFi Protect.
 
@@ -2174,7 +2181,7 @@ async def protect_list_lights(console_id: str | None = None) -> str:
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_get_light(light_id: str, console_id: str | None = None) -> str:
     """Get detailed information about a specific Protect light.
 
@@ -2189,7 +2196,7 @@ async def protect_get_light(light_id: str, console_id: str | None = None) -> str
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_update_light(light_id: str, data: dict, console_id: str | None = None) -> str:
     """Update a Protect light's settings.
 
@@ -2210,7 +2217,7 @@ async def protect_update_light(light_id: str, data: dict, console_id: str | None
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_list_sensors(console_id: str | None = None) -> str:
     """List all sensors managed by UniFi Protect.
 
@@ -2225,7 +2232,7 @@ async def protect_list_sensors(console_id: str | None = None) -> str:
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_get_sensor(sensor_id: str, console_id: str | None = None) -> str:
     """Get detailed information about a specific Protect sensor.
 
@@ -2240,7 +2247,7 @@ async def protect_get_sensor(sensor_id: str, console_id: str | None = None) -> s
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_update_sensor(sensor_id: str, data: dict, console_id: str | None = None) -> str:
     """Update a Protect sensor's settings.
 
@@ -2261,7 +2268,7 @@ async def protect_update_sensor(sensor_id: str, data: dict, console_id: str | No
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_list_chimes(console_id: str | None = None) -> str:
     """List all chimes managed by UniFi Protect."""
     try:
@@ -2272,7 +2279,7 @@ async def protect_list_chimes(console_id: str | None = None) -> str:
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_get_chime(chime_id: str, console_id: str | None = None) -> str:
     """Get detailed information about a specific Protect chime.
 
@@ -2287,7 +2294,7 @@ async def protect_get_chime(chime_id: str, console_id: str | None = None) -> str
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_update_chime(chime_id: str, data: dict, console_id: str | None = None) -> str:
     """Update a Protect chime's settings.
 
@@ -2308,7 +2315,7 @@ async def protect_update_chime(chime_id: str, data: dict, console_id: str | None
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_list_events(console_id: str | None = None) -> str:
     """List recent Protect events (motion, smart detections, etc.).
 
@@ -2328,7 +2335,7 @@ async def protect_list_events(console_id: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_list_liveviews(console_id: str | None = None) -> str:
     """List all liveviews configured in UniFi Protect."""
     try:
@@ -2339,7 +2346,7 @@ async def protect_list_liveviews(console_id: str | None = None) -> str:
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_get_liveview(liveview_id: str, console_id: str | None = None) -> str:
     """Get detailed information about a specific Protect liveview.
 
@@ -2354,7 +2361,7 @@ async def protect_get_liveview(liveview_id: str, console_id: str | None = None) 
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 async def protect_create_liveview(data: dict, console_id: str | None = None) -> str:
     """Create a new liveview in UniFi Protect.
 
@@ -2369,7 +2376,7 @@ async def protect_create_liveview(data: dict, console_id: str | None = None) -> 
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_update_liveview(liveview_id: str, data: dict, console_id: str | None = None) -> str:
     """Update an existing liveview in UniFi Protect.
 
@@ -2390,7 +2397,7 @@ async def protect_update_liveview(liveview_id: str, data: dict, console_id: str 
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_list_viewers(console_id: str | None = None) -> str:
     """List all viewers (Viewport devices) in UniFi Protect."""
     try:
@@ -2401,7 +2408,7 @@ async def protect_list_viewers(console_id: str | None = None) -> str:
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_get_viewer(viewer_id: str, console_id: str | None = None) -> str:
     """Get detailed information about a specific Protect viewer.
 
@@ -2416,7 +2423,7 @@ async def protect_get_viewer(viewer_id: str, console_id: str | None = None) -> s
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_update_viewer(viewer_id: str, data: dict, console_id: str | None = None) -> str:
     """Update a Protect viewer's settings.
 
@@ -2437,7 +2444,7 @@ async def protect_update_viewer(viewer_id: str, data: dict, console_id: str | No
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 async def protect_camera_ptz_goto(camera_id: str, slot: str, console_id: str | None = None) -> str:
     """Move a PTZ camera to a preset position.
 
@@ -2453,7 +2460,7 @@ async def protect_camera_ptz_goto(camera_id: str, slot: str, console_id: str | N
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 async def protect_camera_ptz_patrol(
     camera_id: str, slot: str | None = None,
     console_id: str | None = None,
@@ -2475,7 +2482,7 @@ async def protect_camera_ptz_patrol(
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_camera_rtsps_streams(
     camera_id: str,
     create_qualities: list[str] | None = None,
@@ -2510,7 +2517,7 @@ async def protect_camera_rtsps_streams(
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 async def protect_camera_talkback_session(camera_id: str, console_id: str | None = None) -> str:
     """Create a talkback session for a camera (returns stream URL and audio config).
 
@@ -2525,7 +2532,7 @@ async def protect_camera_talkback_session(camera_id: str, console_id: str | None
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_camera_disable_mic(camera_id: str, console_id: str | None = None) -> str:
     """Permanently disable a camera's microphone. Cannot be undone without a reset.
 
@@ -2545,7 +2552,7 @@ async def protect_camera_disable_mic(camera_id: str, console_id: str | None = No
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_list_sirens(console_id: str | None = None) -> str:
     """List all sirens managed by UniFi Protect."""
     try:
@@ -2555,7 +2562,7 @@ async def protect_list_sirens(console_id: str | None = None) -> str:
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_get_siren(siren_id: str, console_id: str | None = None) -> str:
     """Get detailed information about a specific siren.
 
@@ -2569,7 +2576,7 @@ async def protect_get_siren(siren_id: str, console_id: str | None = None) -> str
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_update_siren(siren_id: str, data: dict, console_id: str | None = None) -> str:
     """Update a siren's settings (name, volume, LED).
 
@@ -2585,7 +2592,7 @@ async def protect_update_siren(siren_id: str, data: dict, console_id: str | None
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_siren_control(
     siren_id: str,
     action: str,
@@ -2621,7 +2628,7 @@ async def protect_siren_control(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_list_speakers(console_id: str | None = None) -> str:
     """List all speakers managed by UniFi Protect."""
     try:
@@ -2631,7 +2638,7 @@ async def protect_list_speakers(console_id: str | None = None) -> str:
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_get_speaker(speaker_id: str, console_id: str | None = None) -> str:
     """Get detailed information about a specific speaker.
 
@@ -2645,7 +2652,7 @@ async def protect_get_speaker(speaker_id: str, console_id: str | None = None) ->
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_update_speaker(speaker_id: str, data: dict, console_id: str | None = None) -> str:
     """Update a speaker's settings (name, volume, mic).
 
@@ -2661,7 +2668,7 @@ async def protect_update_speaker(speaker_id: str, data: dict, console_id: str | 
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 async def protect_test_speaker(speaker_id: str, volume: int | None = None, console_id: str | None = None) -> str:
     """Test a speaker's sound at the given volume.
 
@@ -2682,7 +2689,7 @@ async def protect_test_speaker(speaker_id: str, volume: int | None = None, conso
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_list_fobs(console_id: str | None = None) -> str:
     """List all key fobs managed by UniFi Protect."""
     try:
@@ -2692,7 +2699,7 @@ async def protect_list_fobs(console_id: str | None = None) -> str:
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_get_fob(fob_id: str, console_id: str | None = None) -> str:
     """Get detailed information about a specific fob.
 
@@ -2706,7 +2713,7 @@ async def protect_get_fob(fob_id: str, console_id: str | None = None) -> str:
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_update_fob(fob_id: str, data: dict, console_id: str | None = None) -> str:
     """Update a fob's settings (name).
 
@@ -2727,7 +2734,7 @@ async def protect_update_fob(fob_id: str, data: dict, console_id: str | None = N
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_list_relays(console_id: str | None = None) -> str:
     """List all relays (UniFi Connect relays) managed by UniFi Protect."""
     try:
@@ -2737,7 +2744,7 @@ async def protect_list_relays(console_id: str | None = None) -> str:
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_get_relay(relay_id: str, console_id: str | None = None) -> str:
     """Get detailed information about a specific relay.
 
@@ -2751,7 +2758,7 @@ async def protect_get_relay(relay_id: str, console_id: str | None = None) -> str
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_update_relay(relay_id: str, data: dict, console_id: str | None = None) -> str:
     """Update a relay's settings (name, LED).
 
@@ -2767,7 +2774,7 @@ async def protect_update_relay(relay_id: str, data: dict, console_id: str | None
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_activate_relay_output(
     relay_id: str,
     output_id: int,
@@ -2803,7 +2810,7 @@ async def protect_activate_relay_output(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_list_bridges(console_id: str | None = None) -> str:
     """List all bridges managed by UniFi Protect."""
     try:
@@ -2813,7 +2820,7 @@ async def protect_list_bridges(console_id: str | None = None) -> str:
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_get_bridge(bridge_id: str, console_id: str | None = None) -> str:
     """Get detailed information about a specific bridge.
 
@@ -2827,7 +2834,7 @@ async def protect_get_bridge(bridge_id: str, console_id: str | None = None) -> s
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_update_bridge(bridge_id: str, data: dict, console_id: str | None = None) -> str:
     """Update a bridge's settings (name).
 
@@ -2843,7 +2850,7 @@ async def protect_update_bridge(bridge_id: str, data: dict, console_id: str | No
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_list_link_stations(console_id: str | None = None) -> str:
     """List all link stations (non-alarm-hub gateways) managed by UniFi Protect."""
     try:
@@ -2853,7 +2860,7 @@ async def protect_list_link_stations(console_id: str | None = None) -> str:
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_get_link_station(link_station_id: str, console_id: str | None = None) -> str:
     """Get detailed information about a specific link station.
 
@@ -2869,7 +2876,7 @@ async def protect_get_link_station(link_station_id: str, console_id: str | None 
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_update_link_station(link_station_id: str, data: dict, console_id: str | None = None) -> str:
     """Update a link station's settings (name).
 
@@ -2890,7 +2897,7 @@ async def protect_update_link_station(link_station_id: str, data: dict, console_
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_list_alarm_hubs(console_id: str | None = None) -> str:
     """List all alarm hubs managed by UniFi Protect."""
     try:
@@ -2900,7 +2907,7 @@ async def protect_list_alarm_hubs(console_id: str | None = None) -> str:
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_get_alarm_hub(alarm_hub_id: str, console_id: str | None = None) -> str:
     """Get detailed information and status about a specific alarm hub.
 
@@ -2916,7 +2923,7 @@ async def protect_get_alarm_hub(alarm_hub_id: str, console_id: str | None = None
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_update_alarm_hub(alarm_hub_id: str, data: dict, console_id: str | None = None) -> str:
     """Update an alarm hub's settings (name).
 
@@ -2932,7 +2939,7 @@ async def protect_update_alarm_hub(alarm_hub_id: str, data: dict, console_id: st
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_trigger_alarm_hub_output(
     alarm_hub_id: str,
     output_id: int,
@@ -2972,7 +2979,7 @@ async def protect_trigger_alarm_hub_output(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_list_arm_profiles(console_id: str | None = None) -> str:
     """List all arm profiles (local alarm manager only)."""
     try:
@@ -2982,7 +2989,7 @@ async def protect_list_arm_profiles(console_id: str | None = None) -> str:
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 async def protect_create_arm_profile(data: dict, console_id: str | None = None) -> str:
     """Create an arm profile (local alarm manager only).
 
@@ -2998,7 +3005,7 @@ async def protect_create_arm_profile(data: dict, console_id: str | None = None) 
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_update_arm_profile(arm_profile_id: str, data: dict, console_id: str | None = None) -> str:
     """Update an arm profile (local alarm manager only).
 
@@ -3014,7 +3021,7 @@ async def protect_update_arm_profile(arm_profile_id: str, data: dict, console_id
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_delete_arm_profile(arm_profile_id: str, console_id: str | None = None) -> str:
     """Delete an arm profile (local alarm manager only).
 
@@ -3029,7 +3036,7 @@ async def protect_delete_arm_profile(arm_profile_id: str, console_id: str | None
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_arm_alarm(
     action: str,
     arm_profile_id: str | None = None,
@@ -3058,7 +3065,7 @@ async def protect_arm_alarm(
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def protect_send_alarm_webhook(trigger_id: str, console_id: str | None = None) -> str:
     """Send a webhook to the alarm manager to trigger alarms configured with this ID.
 
@@ -3078,7 +3085,7 @@ async def protect_send_alarm_webhook(trigger_id: str, console_id: str | None = N
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_list_users(console_id: str | None = None) -> str:
     """List all Protect users (filtered by access permissions)."""
     try:
@@ -3088,7 +3095,7 @@ async def protect_list_users(console_id: str | None = None) -> str:
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_get_user(user_id: str, console_id: str | None = None) -> str:
     """Get detailed information about a specific Protect user.
 
@@ -3102,7 +3109,7 @@ async def protect_get_user(user_id: str, console_id: str | None = None) -> str:
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_list_ulp_users(console_id: str | None = None) -> str:
     """List UniFi Identity (ULP) users with enrolled credentials (NFC, fingerprints)."""
     try:
@@ -3112,7 +3119,7 @@ async def protect_list_ulp_users(console_id: str | None = None) -> str:
         return _protect_error_response(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 async def protect_get_ulp_user(ulp_user_id: str, console_id: str | None = None) -> str:
     """Get detailed information about a specific UniFi Identity user.
 
