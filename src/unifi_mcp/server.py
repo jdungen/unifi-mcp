@@ -688,17 +688,52 @@ async def mobility_update_device_wireless(
 
 
 @mcp.tool(annotations=READ)
-async def network_info(console_id: str | None = None) -> str:
-    """Get UniFi Network application info and list all local sites.
+async def network_info(
+    console_id: str | None = None,
+    offset: int = 0,
+    limit: int = 25,
+    search: str | None = None,
+) -> str:
+    """Get UniFi Network application info and list local sites.
 
-    Returns application version and details, plus all sites configured
+    Returns application version and details, plus the sites configured
     on the local UniFi console. Use this first to discover site IDs
-    needed by other network_* tools.
+    (UUIDs) needed by other network_* tools.
+
+    Args:
+        offset: Pagination offset for the site list (default 0).
+        limit: Sites per page (default 25, max 200).
+        search: Optional case-insensitive text to match against the site
+            name or internal reference (e.g. "Peer" or "yycu6iih"). When
+            given, all sites are fetched page by page and only matches are
+            returned; offset/limit are ignored.
     """
     try:
         client = _get_network_client(console_id)
         info = await client.get_info()
-        sites = await client.list_sites()
+        if search:
+            needle = search.strip().lower()
+            matches: list[dict] = []
+            page_offset = 0
+            while True:
+                page = await client.list_sites(offset=page_offset, limit=200)
+                items = page.get("data", []) or []
+                for s in items:
+                    hay = f"{s.get('name', '')} {s.get('internalReference', '')}".lower()
+                    if needle in hay:
+                        matches.append(s)
+                page_offset += len(items)
+                total = page.get("totalCount")
+                if not items or (total is not None and page_offset >= total):
+                    break
+            sites = {"data": matches, "totalCount": len(matches), "offset": 0}
+            if not matches:
+                return "\n".join([
+                    format_network_info(info), "",
+                    f'No sites matching "{search}".',
+                ])
+        else:
+            sites = await client.list_sites(offset=offset, limit=min(max(limit, 1), 200))
         parts = [format_network_info(info), "", format_network_sites(sites)]
         return "\n".join(parts)
     except NetworkApiError as e:
