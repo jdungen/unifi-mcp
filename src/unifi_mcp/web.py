@@ -466,6 +466,14 @@ async def logout(request: Request) -> RedirectResponse:
 # ---------------------------------------------------------------------------
 
 
+@mcp.custom_route("/healthz", methods=["GET"])
+async def healthz(request: Request) -> JSONResponse:
+    """Liveness/readiness probe for the container healthcheck (no auth, no data)."""
+    if _store() is None:
+        return JSONResponse({"status": "misconfigured"}, status_code=503)
+    return JSONResponse({"status": "ok"})
+
+
 @mcp.custom_route("/", methods=["GET"])
 async def home(request: Request) -> HTMLResponse:
     uid = _uid(request)
