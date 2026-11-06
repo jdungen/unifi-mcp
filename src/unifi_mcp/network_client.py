@@ -92,6 +92,11 @@ class NetworkClient:
             # api.ui.com has a valid public certificate.
             verify_ssl = True
 
+        # Legacy controller API (/proxy/network/api) — needed for switch port
+        # overrides, which the Integration API does not expose.
+        self._legacy_base = base_url[: -len("/integration")] + "/api"
+        self._site_names: dict[str, str] = {}
+
         self._client = httpx.AsyncClient(
             base_url=base_url,
             headers={
@@ -124,10 +129,17 @@ class NetworkClient:
                 429, f"Rate limited. Retry after {retry_after} seconds."
             )
 
-        if response.status_code == 204:
+        if response.status_code == 204 or not response.content:
+            if response.status_code >= 400:
+                raise NetworkApiError(response.status_code, response.reason_phrase or "Empty error response")
             return {"status": "success"}
 
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError:
+            if response.status_code >= 400:
+                raise NetworkApiError(response.status_code, response.text[:500])
+            return {"status": "success", "raw": response.text[:500]}
 
         if response.status_code >= 400:
             message = data.get("message", "") or data.get("error", "") or response.text
@@ -664,3 +676,55 @@ class NetworkClient:
         return await self._get(
             "/v1/dpi/categories", params=self._pagination_params(offset, limit)
         )
+
+    # --- Legacy controller API (switch port configuration) ---
+
+    async def _legacy(
+        self, method: str, path: str, json_body: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Call the legacy controller API; returns the ``data`` list."""
+        response = await self._client.request(
+            method, f"{self._legacy_base}{path}", json=json_body
+        )
+        try:
+            body = response.json() if response.content else {}
+        except ValueError:
+            body = {}
+        meta = body.get("meta", {}) if isinstance(body, dict) else {}
+        if response.status_code >= 400 or meta.get("rc") == "error":
+            msg = meta.get("msg") or (body.get("message") if isinstance(body, dict) else "") or response.text[:300]
+            raise NetworkApiError(response.status_code, f"legacy API: {msg}")
+        return body.get("data", []) if isinstance(body, dict) else []
+
+    async def legacy_site_name(self, site_id: str) -> str:
+        """Map an Integration site UUID to the legacy site name (internalReference)."""
+        if site_id in self._site_names:
+            return self._site_names[site_id]
+        offset = 0
+        while True:
+            page = await self.list_sites(offset=offset, limit=200)
+            items = page.get("data", []) or []
+            for s in items:
+                if s.get("id") and s.get("internalReference"):
+                    self._site_names[s["id"]] = s["internalReference"]
+            offset += len(items)
+            total = page.get("totalCount")
+            if site_id in self._site_names or not items or (total is not None and offset >= total):
+                break
+        if site_id not in self._site_names:
+            raise NetworkApiError(404, f"Site {site_id} not found")
+        return self._site_names[site_id]
+
+    async def legacy_get_device(self, site_name: str, mac: str) -> dict[str, Any]:
+        data = await self._legacy("GET", f"/s/{site_name}/stat/device/{mac.lower()}")
+        if not data:
+            raise NetworkApiError(404, f"Device {mac} not found in legacy API")
+        return data[0]
+
+    async def legacy_list_networks(self, site_name: str) -> list[dict[str, Any]]:
+        return await self._legacy("GET", f"/s/{site_name}/rest/networkconf")
+
+    async def legacy_update_device(
+        self, site_name: str, legacy_id: str, body: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        return await self._legacy("PUT", f"/s/{site_name}/rest/device/{legacy_id}", json_body=body)

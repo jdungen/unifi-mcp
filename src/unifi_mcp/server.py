@@ -1,6 +1,7 @@
 """UniFi MCP Server -- exposes UniFi Site Manager, Network, and Protect APIs as MCP tools."""
 
 import base64
+import json
 import logging
 import os
 import sys
@@ -1491,6 +1492,189 @@ async def network_port_action(
             site_id, device_id, port_idx, {"action": action}
         )
         return format_action_result(result)
+    except NetworkApiError as e:
+        return _network_error_response(e)
+
+
+# ---------------------------------------------------------------------------
+# Network API Tools — Switch port configuration (legacy controller API)
+# ---------------------------------------------------------------------------
+
+_NON_SWITCH_PURPOSES = {"wan", "remote-user-vpn", "site-vpn", "vpn-client", "user-vpn"}
+
+
+def _net_vlan(n: dict) -> int:
+    """VLAN id of a legacy networkconf; the untagged default LAN counts as 1."""
+    if n.get("vlan_enabled") is False or n.get("vlan") in (None, ""):
+        return 1
+    try:
+        return int(n.get("vlan"))
+    except (TypeError, ValueError):
+        return 1
+
+
+async def _switch_context(client: NetworkClient, site_id: str, device_id: str):
+    dev = await client.get_device(site_id, device_id)
+    mac = dev.get("macAddress")
+    if not mac:
+        raise NetworkApiError(404, "Device has no MAC address")
+    site_name = await client.legacy_site_name(site_id)
+    legacy = await client.legacy_get_device(site_name, mac)
+    nets = [
+        n for n in await client.legacy_list_networks(site_name)
+        if n.get("purpose") not in _NON_SWITCH_PURPOSES
+    ]
+    return site_name, legacy, nets
+
+
+def _describe_override(o: dict | None, nets: list[dict]) -> tuple[str, str]:
+    by_id = {n["_id"]: n for n in nets}
+    if not o:
+        return "default (1)", "all (default)"
+    nid = o.get("native_networkconf_id")
+    if nid is None:
+        native = "default (1)"
+    elif nid == "":
+        native = "none"
+    else:
+        n = by_id.get(nid)
+        native = f"{_net_vlan(n)} ({n.get('name')})" if n else f"unknown ({nid})"
+    mgmt = o.get("tagged_vlan_mgmt", "auto")
+    if mgmt == "auto":
+        tagged = "all"
+    elif mgmt == "block_all":
+        tagged = "none"
+    else:
+        excluded = set(o.get("excluded_networkconf_ids") or [])
+        vl = sorted({_net_vlan(n) for n in nets if n["_id"] not in excluded and n["_id"] != nid})
+        tagged = ", ".join(str(v) for v in vl) or "none"
+    return native, tagged
+
+
+@mcp.tool(annotations=READ)
+async def network_get_switch_ports(
+    site_id: str,
+    device_id: str,
+    console_id: str | None = None,
+) -> str:
+    """Show the port configuration of a UniFi switch or gateway.
+
+    Per port: link state, speed, PoE, native VLAN and tagged VLANs, read from
+    the controller's port overrides (legacy controller API, since the
+    Integration API does not expose port configuration).
+
+    Args:
+        site_id: The site ID (UUID).
+        device_id: The device ID (UUID, from network_list_devices).
+    """
+    try:
+        client = _get_network_client(console_id)
+        site_name, legacy, nets = await _switch_context(client, site_id, device_id)
+        overrides = {o.get("port_idx"): o for o in legacy.get("port_overrides", []) or []}
+        lines = [f"## {legacy.get('name') or legacy.get('model')} ({legacy.get('mac')}) — site {site_name}", ""]
+        lines.append("| Port | Name | Link | PoE | Native | Tagged |")
+        lines.append("|---|---|---|---|---|---|")
+        for p in legacy.get("port_table", []) or []:
+            idx = p.get("port_idx")
+            o = overrides.get(idx)
+            native, tagged = _describe_override(o, nets)
+            link = f"{p.get('speed')} Mbps" if p.get("up") else "down"
+            poe = (o or {}).get("poe_mode") or p.get("poe_mode") or "-"
+            name = (o or {}).get("name") or p.get("name") or ""
+            lines.append(f"| {idx} | {name} | {link} | {poe} | {native} | {tagged} |")
+        lines.append("")
+        lines.append("Networks (VLAN → name): " + ", ".join(
+            f"{_net_vlan(n)} {n.get('name')}" for n in sorted(nets, key=_net_vlan)))
+        return "\n".join(lines)
+    except NetworkApiError as e:
+        return _network_error_response(e)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+async def network_set_switch_port(
+    site_id: str,
+    device_id: str,
+    port_idx: int,
+    native_vlan: int | None = 1,
+    tagged_vlans: str = "none",
+    poe: str | None = None,
+    name: str | None = None,
+    dry_run: bool = True,
+    console_id: str | None = None,
+) -> str:
+    """Set native VLAN, tagged VLANs, PoE and name on one switch port.
+
+    Other ports' overrides are kept as they are. Defaults to a dry run that
+    only shows the override it would send; pass dry_run=False to apply.
+    Changing the uplink port can cut the device off from the controller.
+
+    Args:
+        site_id: The site ID (UUID).
+        device_id: The device ID (UUID).
+        port_idx: Port number (1-based).
+        native_vlan: Untagged VLAN id (1 = default LAN); null/0 = no native VLAN.
+        tagged_vlans: "all", "none", or a comma list of VLAN ids, e.g. "50,51,54".
+        poe: "auto" or "off"; omit to leave unchanged.
+        name: Port name; omit to leave unchanged.
+        dry_run: True (default) = show only, False = apply.
+    """
+    try:
+        client = _get_network_client(console_id)
+        site_name, legacy, nets = await _switch_context(client, site_id, device_id)
+        by_vlan: dict[int, dict] = {}
+        for n in nets:
+            by_vlan.setdefault(_net_vlan(n), n)
+
+        overrides = [dict(o) for o in legacy.get("port_overrides", []) or []]
+        current = next((o for o in overrides if o.get("port_idx") == port_idx), None)
+        if current is None:
+            current = {"port_idx": port_idx}
+            overrides.append(current)
+        before = _describe_override(dict(current) if len(current) > 1 else None, nets)
+
+        if not native_vlan:
+            native_id = ""
+        elif native_vlan in by_vlan:
+            native_id = by_vlan[native_vlan]["_id"]
+        else:
+            return f"Error: no network with VLAN {native_vlan} on this site"
+        current["native_networkconf_id"] = native_id
+
+        tv = tagged_vlans.strip().lower()
+        if tv == "all":
+            current["tagged_vlan_mgmt"] = "auto"
+            current.pop("excluded_networkconf_ids", None)
+        elif tv in ("none", ""):
+            current["tagged_vlan_mgmt"] = "block_all"
+            current.pop("excluded_networkconf_ids", None)
+        else:
+            try:
+                wanted = {int(x) for x in tv.replace(" ", "").split(",") if x}
+            except ValueError:
+                return "Error: tagged_vlans must be 'all', 'none' or a comma list of VLAN ids"
+            missing = sorted(v for v in wanted if v not in by_vlan)
+            if missing:
+                return f"Error: no network for VLAN(s) {missing} on this site"
+            current["tagged_vlan_mgmt"] = "custom"
+            current["excluded_networkconf_ids"] = [
+                n["_id"] for n in nets if _net_vlan(n) not in wanted and n["_id"] != native_id
+            ]
+        if poe is not None:
+            if poe not in ("auto", "off"):
+                return "Error: poe must be 'auto' or 'off'"
+            current["poe_mode"] = poe
+        if name is not None:
+            current["name"] = name
+        after = _describe_override(current, nets)
+
+        summary = (f"Port {port_idx} on {legacy.get('name') or legacy.get('mac')}: "
+                   f"native {before[0]} → {after[0]}, tagged {before[1]} → {after[1]}")
+        if poe is not None:
+            summary += f", PoE → {poe}"
+        if dry_run:
+            return f"DRY RUN (nothing changed)\n{summary}\n\nOverride to send:\n{json.dumps(current, indent=2)}"
+        await client.legacy_update_device(site_name, legacy["_id"], {"port_overrides": overrides})
+        return f"Applied. {summary}\nThe switch re-provisions in a few seconds; verify with network_get_switch_ports."
     except NetworkApiError as e:
         return _network_error_response(e)
 
