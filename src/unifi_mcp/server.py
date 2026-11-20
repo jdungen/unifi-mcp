@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -1675,6 +1676,707 @@ async def network_set_switch_port(
             return f"DRY RUN (nothing changed)\n{summary}\n\nOverride to send:\n{json.dumps(current, indent=2)}"
         await client.legacy_update_device(site_name, legacy["_id"], {"port_overrides": overrides})
         return f"Applied. {summary}\nThe switch re-provisions in a few seconds; verify with network_get_switch_ports."
+    except NetworkApiError as e:
+        return _network_error_response(e)
+
+
+# ---------------------------------------------------------------------------
+# Network API Tools — Security, NAT and WAN DNS (internal controller API)
+#
+# None of this is in the official Integration API (checked through 10.6).
+# These tools use the undocumented legacy (/api/s/{site}) and v2
+# (/v2/api/site/{site}) endpoints with the same API key. They can break after
+# a Network update; a 404 then means the endpoint moved. Every write defaults
+# to dry_run=True and shows exactly what it would send.
+# ---------------------------------------------------------------------------
+
+_MAX_OUT = 20000
+
+
+def _dump(obj: object) -> str:
+    text = json.dumps(obj, indent=2, ensure_ascii=False, default=str)
+    if len(text) > _MAX_OUT:
+        text = text[:_MAX_OUT] + f"\n... (truncated, {len(text)} chars total)"
+    return text
+
+
+def _parse_json_arg(raw: str | None, name: str) -> dict:
+    if not raw:
+        return {}
+    try:
+        val = json.loads(raw)
+    except ValueError as e:
+        raise NetworkApiError(400, f"{name} is not valid JSON: {e}") from None
+    if not isinstance(val, dict):
+        raise NetworkApiError(400, f"{name} must be a JSON object")
+    return val
+
+
+def _split_list(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [x.strip().lower() for x in raw.replace(";", ",").split(",") if x.strip()]
+
+
+def _diff(before: dict, after: dict) -> str:
+    keys = sorted(set(before) | set(after))
+    lines = [
+        f"- {k}: {json.dumps(before.get(k), ensure_ascii=False)} → {json.dumps(after.get(k), ensure_ascii=False)}"
+        for k in keys if before.get(k) != after.get(k)
+    ]
+    return "\n".join(lines) or "(no changes)"
+
+
+@mcp.tool(annotations=READ)
+async def network_internal_get(
+    site_id: str,
+    path: str,
+    api: str = "legacy",
+    console_id: str | None = None,
+) -> str:
+    """Read-only GET on an internal (undocumented) controller endpoint.
+
+    For discovery when no dedicated tool exists, or to inspect the exact field
+    names on this Network version before a write. GET only; nothing changes.
+
+    Args:
+        site_id: The site ID (UUID).
+        path: Path below the site, e.g. "rest/setting", "rest/networkconf",
+            "rest/portforward" (api="legacy") or "content-filtering", "nat"
+            (api="v2").
+        api: "legacy" (/api/s/{site}/...) or "v2" (/v2/api/site/{site}/...).
+    """
+    try:
+        client = _get_network_client(console_id)
+        site_name = await client.legacy_site_name(site_id)
+        p = path.strip().lstrip("/")
+        if ".." in p:
+            return "Error: '..' is not allowed in path"
+        if api == "legacy":
+            body = await client.legacy_raw_get(f"/s/{site_name}/{p}")
+        elif api == "v2":
+            body = await client.v2_raw_get(f"/site/{site_name}/{p}")
+        else:
+            return "Error: api must be 'legacy' or 'v2'"
+        return _dump(body)
+    except NetworkApiError as e:
+        return _network_error_response(e)
+
+
+# --- Content filtering (CyberSecure) ---------------------------------------
+
+
+def _format_content_filter(f: dict) -> str:
+    lines = [
+        f"### {f.get('name')} ({'enabled' if f.get('enabled') else 'disabled'}) — id {f.get('_id') or f.get('id')}",
+        f"- Categories: {', '.join(f.get('categories') or []) or '-'}",
+        f"- Networks: {', '.join(f.get('network_ids') or []) or '-'}",
+        f"- Clients: {', '.join(f.get('client_macs') or []) or '-'}",
+        f"- Allow list: {', '.join(f.get('allow_list') or []) or '-'}",
+        f"- Block list: {', '.join(f.get('block_list') or []) or '-'}",
+        f"- Safe search: {', '.join(f.get('safe_search') or []) or '-'}",
+    ]
+    if f.get("schedule"):
+        lines.append(f"- Schedule: {json.dumps(f.get('schedule'))}")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=READ)
+async def network_list_content_filters(
+    site_id: str,
+    console_id: str | None = None,
+) -> str:
+    """List CyberSecure content-filtering profiles (DNS category blocking).
+
+    Shows per profile: blocked categories, the networks/clients it applies to,
+    and the domain allow/block lists. A domain stopped by the UniFi block page
+    is usually caught by one of these categories; add it to allow_list with
+    network_update_content_filter.
+
+    Args:
+        site_id: The site ID (UUID).
+    """
+    try:
+        client = _get_network_client(console_id)
+        site_name = await client.legacy_site_name(site_id)
+        filters = await client.list_content_filters(site_name)
+        if not filters:
+            return f"No content-filtering profiles on site {site_name}."
+        nets = {n["_id"]: n.get("name") for n in await client.legacy_list_networks(site_name)}
+        out = [f"## Content filters — site {site_name}", ""]
+        for f in filters:
+            f = dict(f)
+            f["network_ids"] = [f"{nets.get(i, '?')} ({i})" for i in f.get("network_ids") or []]
+            out.append(_format_content_filter(f))
+            out.append("")
+        return "\n".join(out)
+    except NetworkApiError as e:
+        return _network_error_response(e)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+async def network_update_content_filter(
+    site_id: str,
+    filter_id: str,
+    allow_add: str | None = None,
+    allow_remove: str | None = None,
+    block_add: str | None = None,
+    block_remove: str | None = None,
+    categories: str | None = None,
+    enabled: bool | None = None,
+    dry_run: bool = True,
+    console_id: str | None = None,
+) -> str:
+    """Change a content-filtering profile: allow/block domains, categories, on/off.
+
+    Reads the full profile, applies the changes and PUTs the whole object back
+    (the endpoint has no partial update). Defaults to a dry run.
+
+    Args:
+        site_id: The site ID (UUID).
+        filter_id: Profile id from network_list_content_filters.
+        allow_add: Comma list of domains to add to the allow list, e.g. "e.mail.ralphlauren.eu".
+        allow_remove: Comma list of domains to remove from the allow list.
+        block_add: Comma list of domains to add to the block list.
+        block_remove: Comma list of domains to remove from the block list.
+        categories: Full replacement comma list of blocked categories; omit to keep.
+        enabled: True/False to switch the profile on/off; omit to keep.
+        dry_run: True (default) = show only, False = apply.
+    """
+    try:
+        client = _get_network_client(console_id)
+        site_name = await client.legacy_site_name(site_id)
+        filters = await client.list_content_filters(site_name)
+        cur = next((f for f in filters if (f.get("_id") or f.get("id")) == filter_id), None)
+        if cur is None:
+            return f"Error: content filter {filter_id} not found on site {site_name}"
+        new = json.loads(json.dumps(cur))
+
+        def apply(key: str, add: str | None, remove: str | None) -> None:
+            items = list(new.get(key) or [])
+            for d in _split_list(add):
+                if d not in items:
+                    items.append(d)
+            rm = set(_split_list(remove))
+            new[key] = [d for d in items if d not in rm]
+
+        apply("allow_list", allow_add, allow_remove)
+        apply("block_list", block_add, block_remove)
+        if categories is not None:
+            new["categories"] = [c.strip().upper() for c in categories.split(",") if c.strip()]
+        if enabled is not None:
+            new["enabled"] = enabled
+        for key in ("allow_list", "block_list"):
+            if cur.get(key) and not new.get(key):
+                return (f"Error: this would empty {key}. The controller rejects an empty "
+                        f"list on update; remove the last entry in the UniFi UI.")
+        changed = {k: new.get(k) for k in new if new.get(k) != cur.get(k)}
+        summary = f"Content filter '{cur.get('name')}' on site {site_name}:\n{_diff(cur, new)}"
+        if not changed:
+            return summary
+        if dry_run:
+            return f"DRY RUN (nothing changed)\n{summary}"
+        await client.update_content_filter(site_name, filter_id, new)
+        after = next((f for f in await client.list_content_filters(site_name)
+                      if (f.get("_id") or f.get("id")) == filter_id), None)
+        verify = "" if after is None else "\n\nRead back:\n" + _format_content_filter(after)
+        if after is not None:
+            missing = [k for k in ("allow_list", "block_list", "categories", "enabled")
+                       if k in changed and after.get(k) != new.get(k)]
+            if missing:
+                verify += f"\nWarning: read-back differs from what was sent for {missing}."
+        return f"Applied. {summary}{verify}\nDNS caches on clients may keep the old answer for a few minutes."
+    except NetworkApiError as e:
+        return _network_error_response(e)
+
+
+# --- Security settings (IPS, ad blocking, region blocking) -----------------
+
+_GEO_PREFIX = "geo_ip_filtering"
+
+
+@mcp.tool(annotations=READ)
+async def network_get_security_settings(
+    site_id: str,
+    key: str | None = None,
+    console_id: str | None = None,
+) -> str:
+    """Show CyberSecure settings: IPS/IDS, ad blocking, DNS filtering, region blocking.
+
+    Without key: the full 'ips' setting (IPS mode, categories, ad blocking,
+    honeypot, suppression) plus the region-blocking (geo_ip_filtering_*)
+    fields, and a list of all setting keys on the site. With key: that whole
+    setting object (e.g. "usg", "dpi", "mgmt", "country").
+
+    Args:
+        site_id: The site ID (UUID).
+        key: Optional setting key to show in full.
+    """
+    try:
+        client = _get_network_client(console_id)
+        site_name = await client.legacy_site_name(site_id)
+        settings = await client.legacy_get_settings(site_name)
+        by_key = {s.get("key"): s for s in settings}
+        if key:
+            if key not in by_key:
+                return f"Error: no setting '{key}'. Available: {', '.join(sorted(k for k in by_key if k))}"
+            return _dump(by_key[key])
+        out: dict = {"site": site_name, "ips": by_key.get("ips")}
+        geo = {k: v for s in settings for k, v in s.items() if k.startswith(_GEO_PREFIX)}
+        geo_keys = sorted({s.get("key") for s in settings if any(k.startswith(_GEO_PREFIX) for k in s)})
+        out["region_blocking"] = {"setting_keys": geo_keys, **geo} if geo else "not found in settings"
+        out["all_setting_keys"] = sorted(k for k in by_key if k)
+        return _dump(out)
+    except NetworkApiError as e:
+        return _network_error_response(e)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+async def network_update_setting(
+    site_id: str,
+    key: str,
+    changes_json: str,
+    dry_run: bool = True,
+    console_id: str | None = None,
+) -> str:
+    """Change fields of one controller setting (e.g. 'ips' or 'usg').
+
+    Only the given top-level fields are changed; the rest of the setting is
+    sent back unchanged. Use network_get_security_settings first to see the
+    exact field names on this version. Defaults to a dry run.
+
+    Examples:
+        key="ips", changes_json='{"ips_mode": "ips"}'
+        key="ips", changes_json='{"ad_blocking_enabled": false}'
+        key="usg", changes_json='{"geo_ip_filtering_enabled": true,
+            "geo_ip_filtering_countries": "CN,RU", "geo_ip_filtering_block": "block"}'
+
+    Args:
+        site_id: The site ID (UUID).
+        key: Setting key, e.g. "ips", "usg".
+        changes_json: JSON object with the fields to change.
+        dry_run: True (default) = show only, False = apply.
+    """
+    try:
+        changes = _parse_json_arg(changes_json, "changes_json")
+        if not changes:
+            return "Error: changes_json is empty"
+        if any(k in changes for k in ("_id", "key", "site_id")):
+            return "Error: _id, key and site_id cannot be changed"
+        client = _get_network_client(console_id)
+        site_name = await client.legacy_site_name(site_id)
+        settings = await client.legacy_get_settings(site_name)
+        cur = next((s for s in settings if s.get("key") == key), None)
+        if cur is None:
+            return f"Error: no setting '{key}' on site {site_name}"
+        unknown = sorted(k for k in changes if k not in cur)
+        new = {**cur, **changes}
+        summary = f"Setting '{key}' on site {site_name}:\n{_diff(cur, new)}"
+        if unknown:
+            summary += (f"\n\nWarning: field(s) {unknown} do not exist in the current setting; "
+                        "check the spelling, the controller may ignore or reject them.")
+        if dry_run:
+            return f"DRY RUN (nothing changed)\n{summary}"
+        await client.legacy_update_setting(site_name, key, cur["_id"], new)
+        after = next((s for s in await client.legacy_get_settings(site_name) if s.get("key") == key), {})
+        ignored = sorted(k for k, v in changes.items() if after.get(k) != v)
+        tail = f"\nWarning: not stored as sent: {ignored}" if ignored else "\nVerified by read-back."
+        return f"Applied. {summary}{tail}"
+    except NetworkApiError as e:
+        return _network_error_response(e)
+
+
+@mcp.tool(annotations=READ)
+async def network_list_security_events(
+    site_id: str,
+    hours: int = 24,
+    kind: str = "ips",
+    search: str | None = None,
+    limit: int = 50,
+    console_id: str | None = None,
+) -> str:
+    """List security events from the system log (IPS threats, blocks).
+
+    Uses the v2 system log (category SECURITY), where Network 9.3+ records
+    threat blocks; the old stat/ips/event endpoint is empty or gone there.
+
+    Args:
+        site_id: The site ID (UUID).
+        hours: Look-back window in hours (default 24, max 720).
+        kind: "ips" (intrusion prevention only, default) or "all" (every
+            SECURITY event: IPS, firewall, honeypot, content/region blocks).
+        search: Optional text to match in the event (domain, IP, client name).
+        limit: Max events to return (default 50, max 500).
+    """
+    try:
+        client = _get_network_client(console_id)
+        site_name = await client.legacy_site_name(site_id)
+        hours = max(1, min(hours, 720))
+        limit = max(1, min(limit, 500))
+        now_ms = int(time.time() * 1000)
+        body: dict = {
+            "timestampFrom": now_ms - hours * 3600 * 1000,
+            "timestampTo": now_ms,
+            "categories": ["SECURITY"],
+            "pageSize": 100,
+        }
+        if kind == "ips":
+            body["subcategories"] = ["SECURITY_INTRUSION_PREVENTION"]
+        elif kind != "all":
+            return "Error: kind must be 'ips' or 'all'"
+        needle = (search or "").lower()
+        events: list[dict] = []
+        seen: set = set()
+        for page in range(10):
+            rows = await client.system_log(site_name, {**body, "pageNumber": page})
+            for r in rows:
+                if kind == "ips" and r.get("subcategory") not in (None, "SECURITY_INTRUSION_PREVENTION"):
+                    continue
+                rid = r.get("id")
+                if rid is not None:
+                    if rid in seen:
+                        continue
+                    seen.add(rid)
+                if needle and needle not in json.dumps(r, default=str).lower():
+                    continue
+                events.append(r)
+            if len(events) >= limit or len(rows) < 100:
+                break
+        events = events[:limit]
+        if not events:
+            return f"No {kind} security events in the last {hours} h on site {site_name}" + (
+                f" matching '{search}'." if search else ".")
+        out = [f"## {len(events)} security events — site {site_name}, last {hours} h", ""]
+        for r in events:
+            ts = r.get("timestamp") or r.get("time")
+            when = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(ts / 1000)) + " UTC" if isinstance(ts, (int, float)) else str(ts)
+            title = r.get("title") or r.get("message") or r.get("key") or r.get("event")
+            params = r.get("parameters") or {}
+            detail = {k: (v.get("name") or v.get("id") if isinstance(v, dict) else v) for k, v in params.items()} if isinstance(params, dict) else params
+            out.append(f"- {when} [{r.get('subcategory') or r.get('category')}] {title} {json.dumps(detail, ensure_ascii=False, default=str) if detail else ''}")
+        return "\n".join(out)
+    except NetworkApiError as e:
+        return _network_error_response(e)
+
+
+# --- NAT rules (DNAT / SNAT / masquerade) ----------------------------------
+
+
+def _format_nat(r: dict, nets: dict) -> str:
+    def iface(v: object) -> str:
+        return f"{nets.get(v, '?')} ({v})" if v else "-"
+
+    def flt(f: dict | None) -> str:
+        if not f or f.get("filter_type") in (None, "NONE"):
+            return "any"
+        parts = []
+        if f.get("address"):
+            parts.append(("!" if f.get("invert_address") else "") + str(f.get("address")))
+        if f.get("network_conf_id"):
+            parts.append(f"net {nets.get(f['network_conf_id'], f['network_conf_id'])}")
+        if f.get("port"):
+            parts.append(("!" if f.get("invert_port") else "") + f"port {f.get('port')}")
+        if f.get("firewall_group_ids"):
+            parts.append(f"groups {f.get('firewall_group_ids')}")
+        return " ".join(parts) or str(f.get("filter_type"))
+
+    flag = "on" if r.get("enabled") else "off"
+    pre = " (predefined)" if r.get("is_predefined") else ""
+    to = r.get("ip_address") or "-"
+    if r.get("port"):
+        to += f":{r.get('port')}"
+    return (f"- [{flag}] #{r.get('rule_index')} {r.get('type')} {r.get('description') or ''}{pre} — id {r.get('_id')}\n"
+            f"  proto {r.get('protocol')}, in {iface(r.get('in_interface'))}, out {iface(r.get('out_interface'))}, "
+            f"src {flt(r.get('source_filter'))}, dst {flt(r.get('destination_filter'))} → {to}")
+
+
+async def _nat_context(client: NetworkClient, site_id: str):
+    site_name = await client.legacy_site_name(site_id)
+    nets = {n["_id"]: n.get("name") for n in await client.legacy_list_networks(site_name)}
+    return site_name, nets
+
+
+@mcp.tool(annotations=READ)
+async def network_list_nat_rules(
+    site_id: str,
+    raw: bool = False,
+    console_id: str | None = None,
+) -> str:
+    """List NAT rules (DNAT, SNAT, masquerade) on a site's gateway.
+
+    Args:
+        site_id: The site ID (UUID).
+        raw: True = return the full JSON objects (useful as a template).
+    """
+    try:
+        client = _get_network_client(console_id)
+        site_name, nets = await _nat_context(client, site_id)
+        rules = await client.list_nat_rules(site_name)
+        if raw:
+            return _dump(rules)
+        if not rules:
+            return f"No NAT rules on site {site_name}."
+        rules = sorted(rules, key=lambda r: (r.get("rule_index") if isinstance(r.get("rule_index"), int) else 1 << 30))
+        return "\n".join([f"## NAT rules — site {site_name}", ""] + [_format_nat(r, nets) for r in rules])
+    except NetworkApiError as e:
+        return _network_error_response(e)
+
+
+def _nat_filter(address: str | None, port: str | None, network_id: str | None) -> dict:
+    if network_id:
+        return {"filter_type": "NETWORK_CONF", "network_conf_id": network_id,
+                "firewall_group_ids": [], "invert_address": False, "invert_port": False,
+                **({"port": port} if port else {})}
+    if not address and not port:
+        return {"filter_type": "NONE", "firewall_group_ids": [], "invert_address": False, "invert_port": False}
+    f: dict = {"filter_type": "ADDRESS_AND_PORT", "firewall_group_ids": [],
+               "invert_address": False, "invert_port": False}
+    if address:
+        f["address"] = address
+    if port:
+        f["port"] = port
+    return f
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+async def network_create_nat_rule(
+    site_id: str,
+    type: str,
+    description: str,
+    protocol: str = "tcp_udp",
+    in_interface: str | None = None,
+    out_interface: str | None = None,
+    translated_ip: str | None = None,
+    translated_port: str | None = None,
+    source_address: str | None = None,
+    source_network_id: str | None = None,
+    source_port: str | None = None,
+    destination_address: str | None = None,
+    destination_port: str | None = None,
+    destination_network_id: str | None = None,
+    enabled: bool = True,
+    logging: bool = False,
+    extra_json: str | None = None,
+    dry_run: bool = True,
+    console_id: str | None = None,
+) -> str:
+    """Create a NAT rule. Defaults to a dry run that shows the payload.
+
+    Example — redirect all NTP from a LAN to the gateway (DNAT):
+        type="DNAT", description="NTP redirect", protocol="udp",
+        in_interface=<LAN network id>, destination_port="123",
+        translated_ip=<gateway LAN IP>, translated_port="123"
+
+    Field names follow /v2/api/site/{site}/nat. Check an existing rule with
+    network_list_nat_rules(raw=True) if a create is rejected.
+
+    Args:
+        site_id: The site ID (UUID).
+        type: "DNAT", "SNAT" or "MASQUERADE".
+        description: Rule name.
+        protocol: "tcp_udp" (default), "tcp", "udp" or "all".
+        in_interface: Network id the traffic arrives on (DNAT).
+        out_interface: Network id the traffic leaves on (SNAT/masquerade).
+        translated_ip: New destination (DNAT) or source (SNAT) IP.
+        translated_port: New port, optional.
+        source_address / source_port / source_network_id: Source match.
+        destination_address / destination_port / destination_network_id: Destination match.
+        enabled: Rule on (default True).
+        logging: Log matches (default False).
+        extra_json: JSON object merged last into the payload for any other field.
+        dry_run: True (default) = show only, False = apply.
+    """
+    try:
+        t = type.upper()
+        if t not in ("DNAT", "SNAT", "MASQUERADE"):
+            return "Error: type must be DNAT, SNAT or MASQUERADE"
+        if t in ("DNAT", "SNAT") and not translated_ip:
+            return f"Error: {t} needs translated_ip"
+        client = _get_network_client(console_id)
+        site_name, nets = await _nat_context(client, site_id)
+        for nid in (in_interface, out_interface, source_network_id, destination_network_id):
+            if nid and nid not in nets:
+                return f"Error: network id {nid} not found on site {site_name}"
+        rules = await client.list_nat_rules(site_name)
+        idx = max((r.get("rule_index") for r in rules
+                   if not r.get("is_predefined") and isinstance(r.get("rule_index"), int)), default=0) + 1
+        payload: dict = {
+            "type": t, "description": description, "enabled": enabled, "logging": logging,
+            "protocol": protocol, "ip_version": "IPV4", "rule_index": idx,
+            "setting_preference": "manual", "is_predefined": False, "exclude": False,
+            "source_filter": _nat_filter(source_address, source_port, source_network_id),
+            "destination_filter": _nat_filter(destination_address, destination_port, destination_network_id),
+        }
+        if in_interface:
+            payload["in_interface"] = in_interface
+        if out_interface:
+            payload["out_interface"] = out_interface
+        if translated_ip:
+            payload["ip_address"] = translated_ip
+        if translated_port:
+            payload["port"] = translated_port
+        payload.update(_parse_json_arg(extra_json, "extra_json"))
+        preview = _format_nat({**payload, "_id": "(new)"}, nets)
+        if dry_run:
+            return f"DRY RUN (nothing changed) — site {site_name}\n{preview}\n\nPayload:\n{_dump(payload)}"
+        created = await client.create_nat_rule(site_name, payload)
+        return f"Created on site {site_name}:\n{preview}\n\nController answer:\n{_dump(created)}"
+    except NetworkApiError as e:
+        return _network_error_response(e)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+async def network_update_nat_rule(
+    site_id: str,
+    rule_id: str,
+    changes_json: str,
+    dry_run: bool = True,
+    console_id: str | None = None,
+) -> str:
+    """Change fields of an existing NAT rule (full object is PUT back).
+
+    Examples: '{"enabled": false}', '{"ip_address": "192.168.1.1"}',
+    '{"destination_filter": {"filter_type": "ADDRESS_AND_PORT", "port": "123"}}'.
+    Predefined (system) rules cannot be changed. Defaults to a dry run.
+
+    Args:
+        site_id: The site ID (UUID).
+        rule_id: Rule id from network_list_nat_rules.
+        changes_json: JSON object with the fields to change.
+        dry_run: True (default) = show only, False = apply.
+    """
+    try:
+        changes = _parse_json_arg(changes_json, "changes_json")
+        if not changes:
+            return "Error: changes_json is empty"
+        client = _get_network_client(console_id)
+        site_name, nets = await _nat_context(client, site_id)
+        cur = next((r for r in await client.list_nat_rules(site_name) if r.get("_id") == rule_id), None)
+        if cur is None:
+            return f"Error: NAT rule {rule_id} not found on site {site_name}"
+        if cur.get("is_predefined"):
+            return "Error: this is a predefined system rule; it cannot be changed"
+        changes.pop("_id", None)
+        new = {**cur, **changes}
+        summary = (f"NAT rule on site {site_name}\nBefore:\n{_format_nat(cur, nets)}\n"
+                   f"After:\n{_format_nat(new, nets)}\n\nChanged fields:\n{_diff(cur, new)}")
+        if dry_run:
+            return f"DRY RUN (nothing changed)\n{summary}"
+        await client.update_nat_rule(site_name, rule_id, new)
+        return f"Applied. {summary}"
+    except NetworkApiError as e:
+        return _network_error_response(e)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+async def network_delete_nat_rule(
+    site_id: str,
+    rule_id: str,
+    dry_run: bool = True,
+    console_id: str | None = None,
+) -> str:
+    """Delete a NAT rule. Defaults to a dry run that shows the rule.
+
+    Args:
+        site_id: The site ID (UUID).
+        rule_id: Rule id from network_list_nat_rules.
+        dry_run: True (default) = show only, False = delete.
+    """
+    try:
+        client = _get_network_client(console_id)
+        site_name, nets = await _nat_context(client, site_id)
+        cur = next((r for r in await client.list_nat_rules(site_name) if r.get("_id") == rule_id), None)
+        if cur is None:
+            return f"Error: NAT rule {rule_id} not found on site {site_name}"
+        if cur.get("is_predefined"):
+            return "Error: this is a predefined system rule; it cannot be deleted"
+        if dry_run:
+            return f"DRY RUN (nothing deleted) — would delete on site {site_name}:\n{_format_nat(cur, nets)}"
+        await client.delete_nat_rule(site_name, rule_id)
+        return f"Deleted on site {site_name}:\n{_format_nat(cur, nets)}\n\nBackup of the rule:\n{_dump(cur)}"
+    except NetworkApiError as e:
+        return _network_error_response(e)
+
+
+# --- WAN DNS ------------------------------------------------------------------
+
+_WAN_DNS_FIELDS = ("wan_dns_preference", "wan_dns1", "wan_dns2",
+                   "wan_ipv6_dns_preference", "wan_ipv6_dns1", "wan_ipv6_dns2")
+
+
+@mcp.tool(annotations=READ)
+async def network_get_wan_dns(
+    site_id: str,
+    console_id: str | None = None,
+) -> str:
+    """Show the DNS servers configured on each WAN (auto from ISP, or manual).
+
+    Args:
+        site_id: The site ID (UUID).
+    """
+    try:
+        client = _get_network_client(console_id)
+        site_name = await client.legacy_site_name(site_id)
+        wans = [n for n in await client.legacy_list_networks(site_name) if n.get("purpose") == "wan"]
+        if not wans:
+            return f"No WAN networks on site {site_name} (no gateway?)."
+        out = [f"## WAN DNS — site {site_name}", ""]
+        for w in wans:
+            fields = {k: w.get(k) for k in _WAN_DNS_FIELDS if k in w}
+            out.append(f"- {w.get('name')} ({w.get('wan_networkgroup') or ''}) id {w['_id']}: "
+                       + (", ".join(f"{k}={v}" for k, v in fields.items()) or "no DNS fields (ISP default)"))
+        return "\n".join(out)
+    except NetworkApiError as e:
+        return _network_error_response(e)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+async def network_set_wan_dns(
+    site_id: str,
+    network_id: str,
+    mode: str = "manual",
+    dns1: str | None = None,
+    dns2: str | None = None,
+    dry_run: bool = True,
+    console_id: str | None = None,
+) -> str:
+    """Set the IPv4 DNS servers on one WAN. Defaults to a dry run.
+
+    Changing WAN settings re-provisions the gateway; expect a short
+    interruption on that WAN.
+
+    Args:
+        site_id: The site ID (UUID).
+        network_id: WAN network id from network_get_wan_dns.
+        mode: "manual" (use dns1/dns2) or "auto" (ISP-provided).
+        dns1: Primary DNS IP (required for manual).
+        dns2: Secondary DNS IP, optional.
+        dry_run: True (default) = show only, False = apply.
+    """
+    try:
+        if mode not in ("manual", "auto"):
+            return "Error: mode must be 'manual' or 'auto'"
+        if mode == "manual" and not dns1:
+            return "Error: manual mode needs dns1"
+        client = _get_network_client(console_id)
+        site_name = await client.legacy_site_name(site_id)
+        wan = next((n for n in await client.legacy_list_networks(site_name)
+                    if n.get("_id") == network_id and n.get("purpose") == "wan"), None)
+        if wan is None:
+            return f"Error: WAN network {network_id} not found on site {site_name}"
+        changes: dict = {"wan_dns_preference": mode}
+        if mode == "manual":
+            changes["wan_dns1"] = dns1
+            changes["wan_dns2"] = dns2 or ""
+        before = {k: wan.get(k) for k in changes}
+        summary = f"WAN '{wan.get('name')}' on site {site_name}:\n{_diff(before, changes)}"
+        if dry_run:
+            return f"DRY RUN (nothing changed)\n{summary}"
+        await client.legacy_update_network(site_name, network_id, changes)
+        after = next((n for n in await client.legacy_list_networks(site_name) if n.get("_id") == network_id), {})
+        bad = sorted(k for k, v in changes.items() if after.get(k) != v)
+        tail = f"\nWarning: not stored as sent: {bad}" if bad else "\nVerified by read-back."
+        return f"Applied. {summary}{tail}"
     except NetworkApiError as e:
         return _network_error_response(e)
 
