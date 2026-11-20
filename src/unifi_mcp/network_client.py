@@ -95,6 +95,9 @@ class NetworkClient:
         # Legacy controller API (/proxy/network/api) — needed for switch port
         # overrides, which the Integration API does not expose.
         self._legacy_base = base_url[: -len("/integration")] + "/api"
+        # Internal v2 API (/proxy/network/v2/api) — content filtering, NAT,
+        # system log. Undocumented; plain JSON without the meta/data envelope.
+        self._v2_base = base_url[: -len("/integration")] + "/v2/api"
         self._site_names: dict[str, str] = {}
 
         self._client = httpx.AsyncClient(
@@ -728,3 +731,88 @@ class NetworkClient:
         self, site_name: str, legacy_id: str, body: dict[str, Any]
     ) -> list[dict[str, Any]]:
         return await self._legacy("PUT", f"/s/{site_name}/rest/device/{legacy_id}", json_body=body)
+
+    async def legacy_raw_get(self, path: str) -> Any:
+        """GET any legacy path and return the full decoded body (for discovery)."""
+        response = await self._client.request("GET", f"{self._legacy_base}{path}")
+        return self._decode_internal(response, "legacy API")
+
+    async def legacy_get_settings(self, site_name: str) -> list[dict[str, Any]]:
+        return await self._legacy("GET", f"/s/{site_name}/rest/setting")
+
+    async def legacy_update_setting(
+        self, site_name: str, key: str, setting_id: str, body: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        return await self._legacy(
+            "PUT", f"/s/{site_name}/rest/setting/{key}/{setting_id}", json_body=body
+        )
+
+    async def legacy_update_network(
+        self, site_name: str, network_id: str, body: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        return await self._legacy(
+            "PUT", f"/s/{site_name}/rest/networkconf/{network_id}", json_body=body
+        )
+
+    # --- Internal v2 API (content filtering, NAT, system log) ---
+
+    @staticmethod
+    def _decode_internal(response: httpx.Response, label: str) -> Any:
+        try:
+            body = response.json() if response.content else {}
+        except ValueError:
+            body = {}
+        meta = body.get("meta", {}) if isinstance(body, dict) else {}
+        if response.status_code >= 400 or (isinstance(meta, dict) and meta.get("rc") == "error"):
+            msg = ""
+            if isinstance(body, dict):
+                msg = (meta.get("msg") if isinstance(meta, dict) else "") or body.get("message") or body.get("code") or ""
+            if response.status_code == 404:
+                msg = (msg or "not found") + (
+                    " (internal endpoint missing: no gateway on this site, or the "
+                    "Network version moved/removed it)"
+                )
+            raise NetworkApiError(response.status_code, f"{label}: {msg or response.text[:300]}")
+        return body
+
+    async def _v2(
+        self, method: str, path: str, json_body: Any = None
+    ) -> Any:
+        response = await self._client.request(
+            method, f"{self._v2_base}{path}", json=json_body
+        )
+        return self._decode_internal(response, "v2 API")
+
+    async def v2_raw_get(self, path: str) -> Any:
+        return await self._v2("GET", path)
+
+    async def list_content_filters(self, site_name: str) -> list[dict[str, Any]]:
+        data = await self._v2("GET", f"/site/{site_name}/content-filtering")
+        return data if isinstance(data, list) else (data.get("data", []) if isinstance(data, dict) else [])
+
+    async def update_content_filter(
+        self, site_name: str, filter_id: str, body: dict[str, Any]
+    ) -> Any:
+        return await self._v2("PUT", f"/site/{site_name}/content-filtering/{filter_id}", body)
+
+    async def list_nat_rules(self, site_name: str) -> list[dict[str, Any]]:
+        data = await self._v2("GET", f"/site/{site_name}/nat")
+        return data if isinstance(data, list) else (data.get("data", []) if isinstance(data, dict) else [])
+
+    async def create_nat_rule(self, site_name: str, body: dict[str, Any]) -> Any:
+        return await self._v2("POST", f"/site/{site_name}/nat", body)
+
+    async def update_nat_rule(self, site_name: str, rule_id: str, body: dict[str, Any]) -> Any:
+        return await self._v2("PUT", f"/site/{site_name}/nat/{rule_id}", body)
+
+    async def delete_nat_rule(self, site_name: str, rule_id: str) -> Any:
+        return await self._v2("DELETE", f"/site/{site_name}/nat/{rule_id}")
+
+    async def system_log(self, site_name: str, body: dict[str, Any]) -> list[dict[str, Any]]:
+        """POST /system-log/all; unwraps dict / one-element-list / bare-list pages."""
+        data = await self._v2("POST", f"/site/{site_name}/system-log/all", body)
+        if isinstance(data, list) and len(data) == 1 and isinstance(data[0], dict) and "data" in data[0]:
+            data = data[0]
+        if isinstance(data, dict):
+            data = data.get("data", [])
+        return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []

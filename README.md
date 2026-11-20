@@ -108,6 +108,28 @@ Full CRUD access to a UniFi console (UDM, UCG, etc.), via the cloud connector or
 | `network_list_dpi_applications`     | List DPI applications                |
 | `network_list_dpi_categories`       | List DPI categories                  |
 
+### Network API — internal endpoints (CyberSecure, NAT, WAN DNS)
+
+The official Integration API (checked through Network 10.6) has no content
+filtering, ad blocking, IPS/region blocking, NAT or WAN DNS. These tools use
+the controller's **undocumented** internal API (`/proxy/network/api/s/{site}`
+and `/proxy/network/v2/api/site/{site}`) with the same API key and console
+connection, so no local admin account is needed. Ubiquiti can move or change
+these endpoints in any Network update; a 404 then means the endpoint moved.
+Every write tool is marked destructive and defaults to `dry_run=True`.
+
+| Tool | Description |
+|---|---|
+| `network_list_content_filters` | CyberSecure content-filter profiles: categories, scope, allow/block lists |
+| `network_update_content_filter` | Add/remove allow- or block-list domains, change categories, on/off |
+| `network_get_security_settings` | IPS/IDS, ad blocking, honeypot and region-blocking settings |
+| `network_update_setting` | Change fields of a controller setting (`ips`, `usg`, …) with diff + read-back |
+| `network_list_security_events` | IPS threats or all SECURITY events from the v2 system log |
+| `network_list_nat_rules` | DNAT / SNAT / masquerade rules |
+| `network_create_nat_rule` / `network_update_nat_rule` / `network_delete_nat_rule` | Manage NAT rules (e.g. an NTP or DNS redirect) |
+| `network_get_wan_dns` / `network_set_wan_dns` | DNS servers per WAN (auto or manual) |
+| `network_internal_get` | Read-only GET on any internal endpoint below a site, for discovery |
+
 ### Protect API
 
 Access to UniFi Protect devices, via the cloud connector or a local connection:
